@@ -1,0 +1,48 @@
+{
+  "name": "wisekey",
+  "version": "1.0.16",
+  "description": "A lightweight key management library and CLI for Node.js",
+  "main": "./dist/src/WiseKey.js",
+  "types": "./dist/src/WiseKey.d.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "audit": "npm audit --audit-level=moderate"
+  },
+  "keywords": [
+    "wisekey",
+    "cli",
+    "encryption",
+    "sqlite",
+    "keychain"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "ignore": [
+      "test"
+    ]
+  },
+  "dependencies": {
+    "cross-keychain": "^1.1.0",
+    "promappjs": "^1.2.12"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.2",
+    "@types/node-cron": "^3.0.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  },
+  "bin": {
+    "wisekey": "./dist/cli.js"
+  }
+}
