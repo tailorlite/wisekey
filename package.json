@@ -1,0 +1,69 @@
+{
+  "name": "wisekey",
+  "version": "1.0.22",
+  "description": "A lightweight key management library and CLI for Node.js",
+  "main": "./dist/src/WiseKey.js",
+  "types": "./dist/src/WiseKey.d.ts",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "build": "tsc",
+    "prepare": "husky",
+    "prepublishOnly": "npm run build",
+    "audit": "npm audit --audit-level=moderate"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,json,md}": [
+      "prettier --write",
+      "eslint --fix"
+    ]
+  },
+  "keywords": [
+    "wisekey",
+    "cli",
+    "encryption",
+    "sqlite",
+    "keychain"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "ignore": [
+      "test"
+    ]
+  },
+  "dependencies": {
+    "cross-keychain": "^1.1.0",
+    "lmdb": "^3.5.7"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.6.2",
+    "@types/node-cron": "^3.0.11",
+    "eslint": "^10.12.0",
+    "eslint-plugin-prettier": "^5.5.6",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.6.0",
+    "prettier": "^3.9.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.71.1",
+    "vitest": "^5.0.3"
+  },
+  "bin": {
+    "wisekey": "./dist/cli.js"
+  }
+}
