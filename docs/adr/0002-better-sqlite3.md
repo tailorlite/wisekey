@@ -1,7 +1,7 @@
 # ADR 0002: better-sqlite3 over node:sqlite
 
 Date: 2026-09-08
-Status: Superseded by ADR 0003
+Status: Superseded by ADR 0003, then 0004
 
 ## Context
 

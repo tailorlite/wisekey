@@ -5,7 +5,10 @@ const IV_LENGTH = 12; // 96 bits for GCM
 export function generateMasterKey(): Buffer {
     return crypto.randomBytes(32);
 }
-export function encrypt(text: string, key: Buffer): { iv: string; content: string; tag: string } {
+export function encrypt(
+    text: string,
+    key: Buffer,
+): { iv: string; content: string; tag: string } {
     const iv = crypto.randomBytes(IV_LENGTH);
     const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
     let encrypted = cipher.update(text, 'utf8', 'hex');
@@ -19,7 +22,7 @@ export function encrypt(text: string, key: Buffer): { iv: string; content: strin
 }
 export function decrypt(
     payload: { iv: string; content: string; tag: string },
-    key: Buffer
+    key: Buffer,
 ): string {
     try {
         const iv = Buffer.from(payload.iv, 'hex');
@@ -30,6 +33,8 @@ export function decrypt(
         decrypted += decipher.final('utf8');
         return decrypted;
     } catch {
-        throw new DecryptionError('Failed to decrypt payload. Invalid key or corrupted data.');
+        throw new DecryptionError(
+            'Failed to decrypt payload. Invalid key or corrupted data.',
+        );
     }
 }

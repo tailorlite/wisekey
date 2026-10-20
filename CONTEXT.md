@@ -2,7 +2,7 @@
 
 ## Glossary
 
-- Service: named secret store (SQLite DB + keychain master key).
+- Service: named secret store (LMDB store + keychain master key).
 - Key: variable name stored within a Service.
 - Load: parse a dotenv file into a Service (upsert).
 - Export: decrypt all Keys of a Service to a dotenv file, sorted, quote-when-needed.

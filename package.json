@@ -1,6 +1,6 @@
 {
   "name": "wisekey",
-  "version": "1.0.22",
+  "version": "1.1.0",
   "description": "A lightweight key management library and CLI for Node.js",
   "main": "./dist/src/WiseKey.js",
   "types": "./dist/src/WiseKey.d.ts",
@@ -27,7 +27,7 @@
     "wisekey",
     "cli",
     "encryption",
-    "sqlite",
+    "lmdb",
     "keychain"
   ],
   "author": "",
@@ -44,7 +44,7 @@
   },
   "dependencies": {
     "cross-keychain": "^1.1.0",
-    "lmdb": "^3.5.7"
+    "lmdb": "3.0.13"
   },
   "engines": {
     "node": ">=22"

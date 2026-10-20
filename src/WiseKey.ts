@@ -3,7 +3,11 @@ import * as keychain from 'cross-keychain';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { KeychainAccessError, RotationFailedError, MapFullError } from './types.js';
+import {
+    KeychainAccessError,
+    RotationFailedError,
+    MapFullError,
+} from './types.js';
 import { encrypt, decrypt, generateMasterKey } from './crypto-utils.js';
 
 interface WiseKeyConfig {
@@ -18,11 +22,11 @@ interface SecretValue {
 }
 
 interface LMDBStore {
-    getSync(key: string): SecretValue | undefined;
+    get(key: string): SecretValue | undefined;
     putSync(key: string, value: SecretValue): void;
     removeSync(key: string): boolean;
     getRange(
-        options?: Record<string, unknown>
+        options?: Record<string, unknown>,
     ): IterableIterator<{ key: string; value: SecretValue }>;
     transactionSync<T>(callback: () => T): T;
     close(): void;
@@ -35,7 +39,9 @@ class Logger {
         console.log(`[WiseKey INFO] ${new Date().toISOString()} - ${message}`);
     }
     error(message: string): void {
-        console.error(`[WiseKey ERROR] ${new Date().toISOString()} - ${message}`);
+        console.error(
+            `[WiseKey ERROR] ${new Date().toISOString()} - ${message}`,
+        );
     }
 }
 
@@ -51,7 +57,10 @@ export class WiseKey {
         this.logger = new Logger();
     }
 
-    static async init(name: string, options?: { mapSize?: number }): Promise<WiseKey> {
+    static async init(
+        name: string,
+        options?: { mapSize?: number },
+    ): Promise<WiseKey> {
         if (!WiseKey.instance) {
             WiseKey.instance = new WiseKey();
             await WiseKey.instance.initialize(name, options);
@@ -62,7 +71,10 @@ export class WiseKey {
         return WiseKey.instance;
     }
 
-    async initialize(name: string, options?: { mapSize?: number }): Promise<void> {
+    async initialize(
+        name: string,
+        options?: { mapSize?: number },
+    ): Promise<void> {
         const mapSize = options?.mapSize ?? DEFAULT_MAP_SIZE;
         const envDir = path.join(os.homedir(), '.wisekey', '.keys', name);
         this.config = { name, path: envDir };
@@ -72,7 +84,8 @@ export class WiseKey {
         // Ensure parent directory exists and is adequately protected
         try {
             const parent = path.dirname(this.config.path);
-            if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+            if (!fs.existsSync(parent))
+                fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
             else {
                 try {
                     fs.chmodSync(parent, 0o700);
@@ -114,45 +127,60 @@ export class WiseKey {
             if (!existingKey) {
                 const newKey = generateMasterKey().toString('hex');
                 await this.setMasterKey(newKey);
-                this.logger.info('Generated and stored new Master Key in keychain.');
+                this.logger.info(
+                    'Generated and stored new Master Key in keychain.',
+                );
             }
         } catch (error) {
             throw new KeychainAccessError(
-                `Failed to access keychain during initialization: ${error}`
+                `Failed to access keychain during initialization: ${error}`,
             );
         }
     }
 
     async getMasterKey(): Promise<Buffer | null> {
         try {
-            const keyHex = await keychain.getPassword(this.config!.name, this.config!.name);
+            const keyHex = await keychain.getPassword(
+                this.config!.name,
+                this.config!.name,
+            );
             return keyHex ? Buffer.from(keyHex, 'hex') : null;
         } catch (error) {
-            throw new KeychainAccessError(`Failed to retrieve key from keychain: ${error}`);
+            throw new KeychainAccessError(
+                `Failed to retrieve key from keychain: ${error}`,
+            );
         }
     }
 
     async setMasterKey(keyHex: string): Promise<void> {
         try {
-            await keychain.setPassword(this.config!.name, this.config!.name, keyHex);
+            await keychain.setPassword(
+                this.config!.name,
+                this.config!.name,
+                keyHex,
+            );
         } catch (error) {
-            throw new KeychainAccessError(`Failed to store key in keychain: ${error}`);
+            throw new KeychainAccessError(
+                `Failed to store key in keychain: ${error}`,
+            );
         }
     }
 
     async get(keyName: string): Promise<string | null> {
         if (!this.db) throw new Error('Database not initialized');
-        const row = this.db.getSync(keyName);
+        const row = this.db.get(keyName);
         if (!row) return null;
         const masterKey = await this.getMasterKey();
-        if (!masterKey) throw new KeychainAccessError('Master key not found in keychain.');
+        if (!masterKey)
+            throw new KeychainAccessError('Master key not found in keychain.');
         return decrypt(row, masterKey);
     }
 
     async set(keyName: string, value: string): Promise<void> {
         if (!this.db) throw new Error('Database not initialized');
         const masterKey = await this.getMasterKey();
-        if (!masterKey) throw new KeychainAccessError('Master key not found in keychain.');
+        if (!masterKey)
+            throw new KeychainAccessError('Master key not found in keychain.');
         const encrypted = encrypt(value, masterKey);
         this.db.putSync(keyName, encrypted);
     }
@@ -165,7 +193,8 @@ export class WiseKey {
     async getAll(): Promise<Record<string, string>> {
         if (!this.db) throw new Error('Database not initialized');
         const masterKey = await this.getMasterKey();
-        if (!masterKey) throw new KeychainAccessError('Master key not found in keychain.');
+        if (!masterKey)
+            throw new KeychainAccessError('Master key not found in keychain.');
 
         const result: Record<string, string> = {};
         // LMDB cursor iterates in key order (sorted)
@@ -182,15 +211,20 @@ export class WiseKey {
         }
         // Validate hex string
         if (!/^[0-9a-fA-F]{64}$/.test(newKeyHex)) {
-            throw new Error('New master key must be a 64-character hex string (32 bytes).');
+            throw new Error(
+                'New master key must be a 64-character hex string (32 bytes).',
+            );
         }
         this.logger.info('Starting key rotation process...');
         try {
             const oldMasterKey = await this.getMasterKey();
-            if (!oldMasterKey) throw new KeychainAccessError('Old master key not found.');
+            if (!oldMasterKey)
+                throw new KeychainAccessError('Old master key not found.');
             const newMasterKey = Buffer.from(newKeyHex, 'hex');
             if (newMasterKey.length !== 32) {
-                throw new Error('New master key must be 32 bytes (64 hex characters).');
+                throw new Error(
+                    'New master key must be 32 bytes (64 hex characters).',
+                );
             }
 
             // Read all entries first (outside transaction)
@@ -212,9 +246,12 @@ export class WiseKey {
             this.logger.info('Key rotation completed successfully.');
         } catch (error) {
             this.logger.error('Key rotation failed');
-            if (error instanceof Error && error.message.includes('MDB_MAP_FULL')) {
+            if (
+                error instanceof Error &&
+                error.message.includes('MDB_MAP_FULL')
+            ) {
                 throw new MapFullError(
-                    `Rotation failed: database map size exceeded. Try increasing mapSize.`
+                    `Rotation failed: database map size exceeded. Try increasing mapSize.`,
                 );
             }
             throw new RotationFailedError(`Rotation failed: ${error}`);

@@ -1,7 +1,7 @@
 # ADR 0003: Rollback to node:sqlite from better-sqlite3
 
 Date: 2026-09-08
-Status: Accepted
+Status: Superseded by ADR 0004
 Supersedes: 0002
 
 ## Context

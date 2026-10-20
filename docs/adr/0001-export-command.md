@@ -1,7 +1,7 @@
 # ADR 0001: export command
 
 Date: 2026-09-08
-Status: Accepted
+Status: Superseded by ADR 0004
 
 ## Context
 
