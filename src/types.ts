@@ -4,10 +4,34 @@ export class DecryptionError extends Error {
         this.name = 'DecryptionError';
     }
 }
-export class KeychainAccessError extends Error {
+export class MasterKeyAccessError extends Error {
     constructor(message: string) {
         super(message);
-        this.name = 'KeychainAccessError';
+        this.name = 'MasterKeyAccessError';
+    }
+}
+export class WrapKeyMismatchError extends MasterKeyAccessError {
+    constructor(message: string) {
+        super(message);
+        this.name = 'WrapKeyMismatchError';
+    }
+}
+export class WrapKeyUnavailableError extends MasterKeyAccessError {
+    constructor(message: string) {
+        super(message);
+        this.name = 'WrapKeyUnavailableError';
+    }
+}
+export class ReservedKeyError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'ReservedKeyError';
+    }
+}
+export class InsecureEnvironmentError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'InsecureEnvironmentError';
     }
 }
 export class RotationFailedError extends Error {

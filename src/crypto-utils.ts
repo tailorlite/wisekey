@@ -2,9 +2,18 @@ import crypto from 'crypto';
 import { DecryptionError } from './types.js';
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12; // 96 bits for GCM
+const MASTER_KEY_HEX_LENGTH = 64; // 32 bytes
 export function generateMasterKey(): Buffer {
     return crypto.randomBytes(32);
 }
+export function isValidMasterKeyHex(value: string): boolean {
+    return new RegExp(`^[0-9a-fA-F]{${MASTER_KEY_HEX_LENGTH}}$`).test(value);
+}
+/** Short, non-secret identity of a key, used to name Wrap Key files. */
+export function keyFingerprint(key: Buffer): string {
+    return crypto.createHash('sha256').update(key).digest('hex').slice(0, 8);
+}
+
 export function encrypt(
     text: string,
     key: Buffer,

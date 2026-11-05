@@ -1,14 +1,35 @@
 import { open } from 'lmdb';
-import * as keychain from 'cross-keychain';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
-    KeychainAccessError,
+    MasterKeyAccessError,
     RotationFailedError,
+    WrapKeyUnavailableError,
     MapFullError,
 } from './types.js';
-import { encrypt, decrypt, generateMasterKey } from './crypto-utils.js';
+import {
+    encrypt,
+    decrypt,
+    generateMasterKey,
+    isValidMasterKeyHex,
+    keyFingerprint,
+} from './crypto-utils.js';
+import { hardenDirectory, hardenFile } from './fs-utils.js';
+import {
+    MASTER_KEY_ENTRY,
+    WRAP_KEY_ENV,
+    assertStorableKey,
+    createWrapKey,
+    envWrapKey,
+    isReservedKey,
+    isWrappedMasterKeyRecord,
+    pruneWrapKeys,
+    resolveWrapKey,
+    unwrapMasterKey,
+    wrapMasterKey,
+    type WrappedMasterKeyRecord,
+} from './master-key.js';
 
 interface WiseKeyConfig {
     name: string;
@@ -22,12 +43,12 @@ interface SecretValue {
 }
 
 interface LMDBStore {
-    get(key: string): SecretValue | undefined;
-    putSync(key: string, value: SecretValue): void;
+    get(key: string): unknown;
+    putSync(key: string, value: unknown): void;
     removeSync(key: string): boolean;
     getRange(
         options?: Record<string, unknown>,
-    ): IterableIterator<{ key: string; value: SecretValue }>;
+    ): IterableIterator<{ key: string; value: unknown }>;
     transactionSync<T>(callback: () => T): T;
     close(): void;
 }
@@ -81,21 +102,9 @@ export class WiseKey {
         this.envPath = envDir;
         this.initialized = true;
 
-        // Ensure parent directory exists and is adequately protected
-        try {
-            const parent = path.dirname(this.config.path);
-            if (!fs.existsSync(parent))
-                fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
-            else {
-                try {
-                    fs.chmodSync(parent, 0o700);
-                } catch {
-                    /* ignore */
-                }
-            }
-        } catch {
-            // continue and let DB operations report errors
-        }
+        // Key material lives under here, so privacy of the tree is load-bearing.
+        hardenDirectory(path.dirname(envDir));
+        hardenDirectory(envDir);
 
         this.db = open<SecretValue>({
             path: envDir,
@@ -107,142 +116,245 @@ export class WiseKey {
             encoding: 'json',
         }) as unknown as LMDBStore;
 
-        // Tighten DB directory permissions where possible
-        try {
-            fs.chmodSync(envDir, 0o700);
-            const dataFile = path.join(envDir, 'data.mdb');
-            if (fs.existsSync(dataFile)) {
-                fs.chmodSync(dataFile, 0o600);
-            }
-            const lockFile = path.join(envDir, 'lock.mdb');
-            if (fs.existsSync(lockFile)) {
-                fs.chmodSync(lockFile, 0o600);
-            }
-        } catch {
-            // ignore on platforms that don't support POSIX modes
-        }
+        hardenFile(path.join(envDir, 'data.mdb'));
+        hardenFile(path.join(envDir, 'lock.mdb'));
 
         try {
-            const existingKey = await this.getMasterKey();
-            if (!existingKey) {
-                const newKey = generateMasterKey().toString('hex');
-                await this.setMasterKey(newKey);
-                this.logger.info(
-                    'Generated and stored new Master Key in keychain.',
-                );
-            }
+            this.ensureMasterKeyRecord();
         } catch (error) {
-            throw new KeychainAccessError(
-                `Failed to access keychain during initialization: ${error}`,
+            if (error instanceof MasterKeyAccessError) throw error;
+            throw new MasterKeyAccessError(
+                `Failed to establish key material for service "${name}" during initialization: ${error}`,
             );
+        }
+    }
+
+    /**
+     * Create the wrapped Master Key entry on first use. An existing entry that
+     * cannot be unlocked (lost or replaced Wrap Key) does not fail
+     * initialization: the Service reports itself locked and operations that need
+     * the key fail, which leaves `master-key import` a way back in.
+     */
+    private ensureMasterKeyRecord(): void {
+        const record = this.readMasterKeyRecord();
+        if (!record) {
+            const wrapKey = resolveWrapKey(this.config!.path, null);
+            const masterKeyHex = generateMasterKey().toString('hex');
+            this.db!.putSync(
+                MASTER_KEY_ENTRY,
+                wrapMasterKey(masterKeyHex, wrapKey),
+            );
+            this.logger.info(
+                `Generated new Master Key for service "${this.config!.name}", wrapped by Wrap Key ${keyFingerprint(wrapKey)}.`,
+            );
+            return;
+        }
+        try {
+            unwrapMasterKey(record, resolveWrapKey(this.config!.path, record));
+        } catch (error) {
+            if (error instanceof MasterKeyAccessError) {
+                this.logger.error(
+                    `Service "${this.config!.name}" is locked: ${error.message}` +
+                        ' Existing Keys are unreadable until the Wrap Key is restored or the Master Key is imported.',
+                );
+                return;
+            }
+            throw error;
+        }
+    }
+
+    private readMasterKeyRecord(): WrappedMasterKeyRecord | null {
+        if (!this.db) throw new Error('Database not initialized');
+        const value = this.db.get(MASTER_KEY_ENTRY);
+        return isWrappedMasterKeyRecord(value) ? value : null;
+    }
+
+    /** Wrap Key plus stored record give the Master Key; null for a fresh Service. */
+    private unlockMasterKey(): Buffer | null {
+        const record = this.readMasterKeyRecord();
+        if (!record) return null;
+        return unwrapMasterKey(
+            record,
+            resolveWrapKey(this.config!.path, record),
+        );
+    }
+
+    /**
+     * Wrap Key to store the Master Key under. When the Service's Wrap Key is
+     * gone from disk, a fresh one is established: the Master Key (not the Wrap
+     * Key) is what encrypts the Keys, so an imported Master Key must still be
+     * wrappable. An environment-supplied Wrap Key is never substituted.
+     */
+    private storageWrapKey(): Buffer {
+        const record = this.readMasterKeyRecord();
+        try {
+            return resolveWrapKey(this.config!.path, record);
+        } catch (error) {
+            if (error instanceof WrapKeyUnavailableError && !envWrapKey()) {
+                const wrapKey = createWrapKey(this.config!.path);
+                this.logger.info(
+                    `Established new Wrap Key ${keyFingerprint(wrapKey)} for service "${this.config!.name}".`,
+                );
+                return wrapKey;
+            }
+            throw error;
         }
     }
 
     async getMasterKey(): Promise<Buffer | null> {
-        try {
-            const keyHex = await keychain.getPassword(
-                this.config!.name,
-                this.config!.name,
-            );
-            return keyHex ? Buffer.from(keyHex, 'hex') : null;
-        } catch (error) {
-            throw new KeychainAccessError(
-                `Failed to retrieve key from keychain: ${error}`,
-            );
-        }
+        return this.unlockMasterKey();
     }
 
     async setMasterKey(keyHex: string): Promise<void> {
-        try {
-            await keychain.setPassword(
-                this.config!.name,
-                this.config!.name,
-                keyHex,
-            );
-        } catch (error) {
-            throw new KeychainAccessError(
-                `Failed to store key in keychain: ${error}`,
-            );
-        }
+        if (!this.db) throw new Error('Database not initialized');
+        this.db.putSync(
+            MASTER_KEY_ENTRY,
+            wrapMasterKey(keyHex, this.storageWrapKey()),
+        );
     }
 
     async get(keyName: string): Promise<string | null> {
         if (!this.db) throw new Error('Database not initialized');
-        const row = this.db.get(keyName);
+        assertStorableKey(keyName);
+        const row = this.db.get(keyName) as SecretValue | undefined;
         if (!row) return null;
-        const masterKey = await this.getMasterKey();
+        const masterKey = this.unlockMasterKey();
         if (!masterKey)
-            throw new KeychainAccessError('Master key not found in keychain.');
+            throw new MasterKeyAccessError(
+                `No Master Key record for service "${this.config!.name}".`,
+            );
         return decrypt(row, masterKey);
     }
 
     async set(keyName: string, value: string): Promise<void> {
         if (!this.db) throw new Error('Database not initialized');
-        const masterKey = await this.getMasterKey();
+        assertStorableKey(keyName);
+        const masterKey = this.unlockMasterKey();
         if (!masterKey)
-            throw new KeychainAccessError('Master key not found in keychain.');
-        const encrypted = encrypt(value, masterKey);
-        this.db.putSync(keyName, encrypted);
+            throw new MasterKeyAccessError(
+                `No Master Key record for service "${this.config!.name}".`,
+            );
+        this.db.putSync(keyName, encrypt(value, masterKey));
     }
 
     async delete(keyName: string): Promise<void> {
         if (!this.db) throw new Error('Database not initialized');
+        assertStorableKey(keyName);
         this.db.removeSync(keyName);
     }
 
     async getAll(): Promise<Record<string, string>> {
         if (!this.db) throw new Error('Database not initialized');
-        const masterKey = await this.getMasterKey();
+        const masterKey = this.unlockMasterKey();
         if (!masterKey)
-            throw new KeychainAccessError('Master key not found in keychain.');
+            throw new MasterKeyAccessError(
+                `No Master Key record for service "${this.config!.name}".`,
+            );
 
         const result: Record<string, string> = {};
-        // LMDB cursor iterates in key order (sorted)
+        // LMDB cursor iterates in key order (sorted); internals are never exposed
         for (const { key, value } of this.db.getRange({})) {
-            result[key] = decrypt(value, masterKey);
+            if (isReservedKey(key)) continue;
+            result[key] = decrypt(value as SecretValue, masterKey);
         }
         return result;
+    }
+
+    /** The Master Key of this Service as 64 hex characters, for off-box backup. */
+    async exportMasterKey(): Promise<string | null> {
+        const masterKey = this.unlockMasterKey();
+        return masterKey ? masterKey.toString('hex') : null;
+    }
+
+    /**
+     * Restore a previously exported Master Key. Use when the Wrap Key is gone but
+     * the Secrets in the database were encrypted with that key: after importing,
+     * rotate() to re-key and re-wrap everything.
+     */
+    async importMasterKey(keyHex: string): Promise<void> {
+        if (!isValidMasterKeyHex(keyHex)) {
+            throw new MasterKeyAccessError(
+                'Master key must be a 64-character hex string (32 bytes).',
+            );
+        }
+        await this.setMasterKey(keyHex);
+        this.logger.info(
+            `Imported Master Key for service "${this.config!.name}".`,
+        );
+    }
+
+    /**
+     * Re-encrypt the Master Key under a fresh Wrap Key. Keys in the database are
+     * untouched: the Master Key itself does not change, so this is not rotate().
+     */
+    async rotateWrapKey(): Promise<void> {
+        if (!this.db) throw new Error('Database not initialized');
+        if (envWrapKey()) {
+            throw new MasterKeyAccessError(
+                `Cannot rotate the Wrap Key while ${WRAP_KEY_ENV} supplies it. Unset the variable first.`,
+            );
+        }
+        const record = this.readMasterKeyRecord();
+        if (!record)
+            throw new MasterKeyAccessError(
+                `No Master Key record for service "${this.config!.name}".`,
+            );
+        const previousKid = record.kid;
+        const masterKeyHex = unwrapMasterKey(
+            record,
+            resolveWrapKey(this.config!.path, record),
+        ).toString('hex');
+        // Write the new Wrap Key before pointing the record at it, so a crash
+        // leaves the previous (still present) Wrap Key valid.
+        const wrapKey = createWrapKey(this.config!.path);
+        this.db.putSync(MASTER_KEY_ENTRY, wrapMasterKey(masterKeyHex, wrapKey));
+        pruneWrapKeys(this.config!.path, keyFingerprint(wrapKey));
+        this.logger.info(
+            `Re-wrapped Master Key: Wrap Key ${previousKid} -> ${keyFingerprint(wrapKey)}.`,
+        );
     }
 
     async rotate(newKeyHex?: string): Promise<void> {
         if (!this.db) throw new Error('Database not initialized');
         if (!newKeyHex) {
             newKeyHex = generateMasterKey().toString('hex');
-        }
-        // Validate hex string
-        if (!/^[0-9a-fA-F]{64}$/.test(newKeyHex)) {
+        } else if (!isValidMasterKeyHex(newKeyHex)) {
             throw new Error(
                 'New master key must be a 64-character hex string (32 bytes).',
             );
         }
+        const newMasterKey = Buffer.from(newKeyHex, 'hex');
         this.logger.info('Starting key rotation process...');
         try {
-            const oldMasterKey = await this.getMasterKey();
+            const oldMasterKey = this.unlockMasterKey();
             if (!oldMasterKey)
-                throw new KeychainAccessError('Old master key not found.');
-            const newMasterKey = Buffer.from(newKeyHex, 'hex');
-            if (newMasterKey.length !== 32) {
-                throw new Error(
-                    'New master key must be 32 bytes (64 hex characters).',
+                throw new MasterKeyAccessError(
+                    `No Master Key record for service "${this.config!.name}".`,
                 );
-            }
 
-            // Read all entries first (outside transaction)
+            // Read all user Keys first (outside transaction); internals stay put.
             const entries: Array<{ keyName: string; value: SecretValue }> = [];
             for (const { key, value } of this.db.getRange({})) {
-                entries.push({ keyName: key, value });
+                if (isReservedKey(key)) continue;
+                entries.push({ keyName: key, value: value as SecretValue });
             }
 
-            // Re-encrypt all entries in a single transaction
+            // Re-encrypt every Key and rewrite the Master Key record atomically:
+            // a crash or a full map leaves the Service on the old key.
+            const record = this.readMasterKeyRecord();
+            const wrapKey = resolveWrapKey(this.config!.path, record);
+            const wrappedNewMasterKey = wrapMasterKey(newKeyHex, wrapKey);
             this.db.transactionSync(() => {
                 for (const entry of entries) {
                     const decryptedValue = decrypt(entry.value, oldMasterKey);
-                    const newEncrypted = encrypt(decryptedValue, newMasterKey);
-                    this.db!.putSync(entry.keyName, newEncrypted);
+                    this.db!.putSync(
+                        entry.keyName,
+                        encrypt(decryptedValue, newMasterKey),
+                    );
                 }
+                this.db!.putSync(MASTER_KEY_ENTRY, wrappedNewMasterKey);
             });
 
-            await this.setMasterKey(newKeyHex);
             this.logger.info('Key rotation completed successfully.');
         } catch (error) {
             this.logger.error('Key rotation failed');

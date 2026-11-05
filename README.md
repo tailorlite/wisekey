@@ -1,14 +1,16 @@
 # WiseKey
 
-A lightweight key management library and CLI for Node.js using keychain, and supports manual key rotation.
+A lightweight key management library and CLI for Node.js. Secrets are encrypted with AES-256-GCM and kept in an embedded LMDB store; the encryption key is itself wrapped by a per-service key held separately on disk. No OS keychain, no daemons, no prompts — the same behaviour on Linux, macOS, Windows, containers and CI.
 
 ## Features
 
-- **Secure storage**: Secrets are encrypted with AES-256-GCM before being written to SQLite.
-- **Native keychain integration**: The master encryption key is stored with `cross-keychain`.
-- **Key rotation**: Supports both manual and scheduled automatic rotation via cron expressions.
-- **Singleton design**: Initialize once and reuse the same instance across your app.
-- **TypeScript support**: Fully typed API surface.
+- **Encrypted at rest**: every value is sealed with AES-256-GCM before it reaches LMDB.
+- **Wrapped Master Key**: the key that encrypts your secrets is stored wrapped, and the key that wraps it lives outside the database file — copying the database alone discloses nothing.
+- **No platform keyring**: no D-Bus, no Credential Manager, no GNOME Keyring unlock prompts, nothing to install per distribution.
+- **Recoverable**: export a service's Master Key for backup, and import it to unlock a service whose wrap key was lost.
+- **Key rotation**: rotate the Master Key (re-encrypts everything) or re-wrap it (cheap, touches nothing else).
+- **Singleton design**: initialize once and reuse the same instance across your app.
+- **TypeScript support**: fully typed API surface.
 
 ## Installation
 
@@ -16,149 +18,158 @@ A lightweight key management library and CLI for Node.js using keychain, and sup
 npm install wisekey
 ```
 
+Requires Node.js >= 22 (the `lmdb` native dependency is pinned to an exact, prebuilt version).
+
 ## Usage
 
 ### Initialization
 
-Initialize WiseKey once in your application startup. It uses WiseKey's default storage location automatically.
+Initialize WiseKey once at application startup. It uses its default storage location automatically.
 
 ```typescript
 import { WiseKey } from 'wisekey';
 
-async function bootstrap() {
-    const wiseKey = await WiseKey.init('my-app-secrets');
-
-    console.log('WiseKey initialized successfully!');
-}
-
-bootstrap();
+const wiseKey = await WiseKey.init('my-app-secrets');
 ```
+
+The `name` selects the service directory (`~/.wisekey/.keys/<name>`), which owns its own key material: two services never share a key.
 
 ### Storing and Retrieving Secrets
 
-Once initialized, you can store, retrieve, and delete secrets.
-
 ```typescript
 import { WiseKey } from 'wisekey';
 
-async function manageSecrets() {
-    // Get the initialized instance
-    // Note: You must call WiseKey.init() before using it elsewhere
-    const wiseKey = await WiseKey.init('my-app-secrets');
+// Note: you must call WiseKey.init() before using the instance elsewhere
+const wiseKey = await WiseKey.init('my-app-secrets');
 
-    // Store a secret
-    await wiseKey.set('api_key', '<API_KEY_PLACEHOLDER>');
-    console.log('Secret stored.');
-
-    // Retrieve a secret
-    const apiKey = await wiseKey.get('api_key');
-    console.log('Retrieved API Key:', apiKey);
-
-    // Delete a secret
-    await wiseKey.delete('api_key');
-    console.log('Secret deleted.');
-}
+await wiseKey.set('api_key', '<API_KEY_PLACEHOLDER>');
+const apiKey = await wiseKey.get('api_key');
+await wiseKey.delete('api_key');
+const all = await wiseKey.getAll(); // every key, sorted; internals excluded
 ```
 
-### Key Rotation
+Key names beginning with `.` are reserved for WiseKey's own records and are rejected by `set`, `get` and `delete`; they never appear in `getAll()` or in an export.
 
-WiseKey allows you to rotate the master encryption key. When rotated, all stored secrets are decrypted with the old key and re-encrypted with the new key, and the new master key is saved to the OS keychain.
+### Rotating Keys
 
-#### Manual Rotation
-
-You can trigger a rotation manually at any time. You can optionally provide a new 32-byte hex string, or let WiseKey generate a secure one automatically.
+Two different operations, deliberately named differently:
 
 ```typescript
-import { WiseKey } from 'wisekey';
+// Master Key rotation: re-encrypts every secret under a new key (atomic)
+await wiseKey.rotate(); // or wiseKey.rotate('<64 hex chars>')
 
-async function rotateManually() {
-    const wiseKey = await WiseKey.init('my-app-secrets');
-
-    console.log('Starting manual rotation...');
-    await wiseKey.rotate(); // Automatically generates a new master key
-    console.log('Rotation complete!');
-}
+// Wrap Key rotation: re-wraps the Master Key under a fresh wrap key.
+// Secrets are not touched, so this is fast and changes no ciphertexts.
+await wiseKey.rotateWrapKey();
 ```
 
-#### Automatic Rotation
+Automatic (scheduled) rotation is not supported; call `rotate()` when you want it.
 
-WiseKey no longer supports automatic rotation. Use `wiseKey.rotate()` when you want to rotate the master key manually.
+## Security model
+
+Read this before relying on WiseKey for a high-value secret.
+
+Two secrets protect a service:
+
+| Secret          | Protects                   | Stored in                                             |
+| --------------- | -------------------------- | ----------------------------------------------------- |
+| Master Key (MK) | every value of the service | inside the service's LMDB database, **wrapped**       |
+| Wrap Key (WK)   | the Master Key at rest     | `~/.wisekey/.keys/<name>/wrap/<kid>.key`, mode `0600` |
+
+So the boundary is the **filesystem**, not an OS keystore:
+
+- A copy of `data.mdb` alone is useless — the Master Key inside it is encrypted.
+- Anyone who can read both `data.mdb` and `wrap/` can decrypt everything. That includes any process running as you, and anyone with the disk unencrypted and unlocked.
+- On POSIX, WiseKey treats a failure to set `700`/`600` on these files as a fatal error (`InsecureEnvironmentError`). On Windows the POSIX bits are not enforced, so protection comes from your user-profile NTFS ACLs.
+- Against a same-user attacker or an offline disk, an OS keyring plus full-disk encryption is stronger than this scheme; WiseKey trades that for working everywhere and never trapping your data behind an unlock prompt you cannot answer (which is what `cross-keychain` did on headless RHEL — see `docs/adr/0005-*`).
+
+**Backups.** A service is only recoverable from its whole directory (`data.mdb` + `wrap/`), or from its exported Master Key. Backing up `data.mdb` alone silently loses the service. Export the Master Key to offline storage you trust, and treat it as the root secret it is.
+
+**CI and containers.** Set `WISEKEY_WRAP_KEY` to 64 hex characters to supply the wrap key from the environment instead of a file; WiseKey never writes it to disk. Unsetting it locks the service — that is intended, not corruption.
 
 ## CLI Usage
 
-WiseKey also provides a command-line interface for loading secrets from a `.env` file and rotating the master key for a service.
-
-### Load a .env file
-
-Import key-value pairs from a `.env` file into a service:
-
 ```bash
-wisekey <serviceName> load -env [path]
+wisekey <serviceName> load -env [path]   # upsert every pair from a .env file
+wisekey <serviceName> load <file.json>   # replace the service with the file's contents
+wisekey <serviceName> set <key> <value>  # upsert one key
+wisekey <serviceName> set <key> --file <path>  # store a file's utf-8 content (max 1MB)
+wisekey <serviceName> get <key>          # print the decrypted value
+wisekey <serviceName> export <file>      # all keys to a .env or .json file (owner-only)
+wisekey <serviceName> rotate [newKey]    # re-encrypt everything under a new Master Key
 ```
 
-If `path` is omitted, WiseKey uses `.env` in the current working directory.
+Service and key names allow `A-Za-z0-9_.-` up to 64 characters; key names may not start with `.`.
 
-### Rotate the master key
-
-Rotate the master key for a service from the CLI:
+### Master Key commands
 
 ```bash
-wisekey <serviceName> rotate [newKey]
+wisekey <serviceName> master-key export                  # print the Master Key (hex) to stdout
+wisekey <serviceName> master-key export --file <path>    # write it to a new owner-only file
+wisekey <serviceName> master-key import <hex> [--force]  # restore it
+wisekey <serviceName> master-key import --file <path>
+wisekey <serviceName> master-key rotate-wrap             # re-wrap under a fresh Wrap Key
 ```
 
-If `newKey` is omitted, WiseKey generates a new secure master key automatically.
+Import is the recovery path when the wrap key is lost: the service reports itself locked, initialization still succeeds, and importing the exported Master Key makes the existing secrets readable again. Importing a _different_ key than the one currently in use requires `--force`, because it orphans the secrets encrypted under the old key.
 
-The CLI does not expose secret delete or service deletion commands. Use the library API for those operations.
-
-### Set a single key
-
-Upsert one key-value pair into a service (`<value>` is a single argument — quote it if it contains spaces):
-
-```bash
-wisekey <serviceName> set <key> <value>
-```
-
-To store the raw utf-8 content of a file (max 1MB, empty allowed, binary rejected):
-
-```bash
-wisekey <serviceName> set <key> --file <path>
-```
-
-### Get a single key
-
-Print the raw decrypted value of one key to stdout (usable in command substitution). Exits 1 if the key does not exist:
-
-```bash
-wisekey <serviceName> get <key>
-```
+The CLI does not expose secret deletion or service destruction; use the library API for those.
 
 ## API Reference
 
-### `WiseKey.init(name: string, options?: WiseKeyInitOptions): Promise<WiseKey>`
+### `WiseKey.init(name: string, options?: { mapSize?: number }): Promise<WiseKey>`
 
-Initializes the WiseKey instance. Must be called at least once before using the instance.
-
-- `name`: `string` - The identifier used to store the master key in the OS keychain.
+Initializes the singleton instance. Must be called before use. `name` is the service identifier, used as its storage directory name; `mapSize` overrides the 100MB LMDB map size.
 
 ### `wiseKey.set(keyName: string, value: string): Promise<void>`
 
-Encrypts and stores a secret.
+Encrypts and stores a secret. Rejects reserved key names.
 
 ### `wiseKey.get(keyName: string): Promise<string | null>`
 
-Retrieves and decrypts a secret. Returns `null` if the secret does not exist.
+Retrieves and decrypts a secret. Returns `null` if it does not exist.
 
 ### `wiseKey.delete(keyName: string): Promise<void>`
 
 Deletes a secret from the database.
 
+### `wiseKey.getAll(): Promise<Record<string, string>>`
+
+Decrypts every Key of the service, in sorted order. WiseKey's internal records are never included.
+
 ### `wiseKey.rotate(newKeyHex?: string): Promise<void>`
 
-Rotates the master encryption key. Re-encrypts all stored secrets. If `newKeyHex` is not provided, a new secure key is generated automatically.
+Rotates the Master Key and re-encrypts all secrets in a single LMDB transaction. If `newKeyHex` is omitted, a new 32-byte key is generated.
+
+### `wiseKey.rotateWrapKey(): Promise<void>`
+
+Re-wraps the Master Key under a newly generated Wrap Key. Fails if `WISEKEY_WRAP_KEY` supplies the wrap key.
+
+### `wiseKey.getMasterKey(): Promise<Buffer | null>` / `wiseKey.setMasterKey(keyHex: string): Promise<void>`
+
+Read and write the Master Key. `getMasterKey()` returns `null` for a brand-new service and throws if the service is locked.
+
+### `wiseKey.exportMasterKey(): Promise<string | null>` / `wiseKey.importMasterKey(keyHex: string): Promise<void>`
+
+Backup and recovery of the Master Key as 64 hex characters.
 
 ### `wiseKey.close(): void`
 
 Closes the database and releases the singleton instance.
+
+### `wiseKey.destroy(): Promise<void>`
+
+Closes and deletes the entire service directory, including its wrap keys. There is no recovery afterwards unless you exported the Master Key.
+
+## Storage layout
+
+```text
+~/.wisekey/.keys/<serviceName>/
+├── data.mdb        # every Key, AES-256-GCM under the Master Key;
+│                   # plus the internal .master record holding the wrapped Master Key
+├── lock.mdb        # LMDB lock file
+└── wrap/<kid>.key  # 32-byte Wrap Keys, named by their own fingerprint; mode 0600
+```
 
 ## License
 

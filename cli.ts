@@ -30,7 +30,18 @@ function formatEnvValue(value: string): string {
 }
 // Validate service and key names to avoid path traversal and other abuses
 const NAME_REGEX = /^[A-Za-z0-9_.-]{1,64}$/;
-const RESERVED = ['load', 'rotate', 'export', 'set', 'get'];
+const RESERVED = ['load', 'rotate', 'export', 'set', 'get', 'master-key'];
+const MASTER_KEY_ACTIONS = ['export', 'import', 'rotate-wrap'];
+// Names starting with "." address WiseKey internals (.master holds key material)
+const isReservedKeyName = (name: string): boolean => name.startsWith('.');
+function assertUsableKeyName(name: string): void {
+    if (isReservedKeyName(name)) {
+        console.error(
+            `Invalid key name "${name}": names starting with "." are reserved for WiseKey internals.`,
+        );
+        process.exit(1);
+    }
+}
 function printUsage(): void {
     console.error('Usage: wisekey <serviceName> load -env [path]');
     console.error('       wisekey <serviceName> load <file.json>');
@@ -39,6 +50,109 @@ function printUsage(): void {
     console.error('       wisekey <serviceName> set <key> <value>');
     console.error('       wisekey <serviceName> set <key> --file <path>');
     console.error('       wisekey <serviceName> get <key>');
+    console.error(
+        '       wisekey <serviceName> master-key export [--file <path>]',
+    );
+    console.error(
+        '       wisekey <serviceName> master-key import <hex> [--force]',
+    );
+    console.error(
+        '       wisekey <serviceName> master-key import --file <path>',
+    );
+    console.error('       wisekey <serviceName> master-key rotate-wrap');
+}
+async function runMasterKeyCommand(
+    wiseKey: WiseKey,
+    serviceName: string,
+    args: string[],
+): Promise<void> {
+    const action = args[2];
+    if (action === 'export') {
+        let hex: string | null;
+        try {
+            hex = await wiseKey.exportMasterKey();
+        } catch (error) {
+            console.error(
+                `Cannot export Master Key: ${(error as Error).message}`,
+            );
+            process.exit(1);
+        }
+        if (!hex) {
+            console.error(`Service "${serviceName}" has no Master Key.`);
+            process.exit(1);
+        }
+        if (args[3]) {
+            const outPath = path.resolve(args[4]);
+            if (fs.existsSync(outPath)) {
+                console.error(
+                    `Refusing to overwrite existing file: ${outPath}`,
+                );
+                process.exit(1);
+            }
+            fs.writeFileSync(outPath, `${hex}\n`, { mode: 0o600 });
+            try {
+                fs.chmodSync(outPath, 0o600);
+            } catch {
+                /* ignore */
+            }
+            console.log(
+                `Exported Master Key of service: ${serviceName} to ${outPath} (owner-only). Store it where Secrets are not.`,
+            );
+            return;
+        }
+        console.error(
+            'Warning: this key decrypts every Key of the Service. Keep it out of shell history, logs and CI artifacts.',
+        );
+        console.log(hex);
+        return;
+    }
+    if (action === 'import') {
+        const fromFile = args[3] === '--file' || args[3] === '-f';
+        const force = !fromFile && args[4] === '--force';
+        let hex: string;
+        if (fromFile) {
+            const inPath = path.resolve(args[4]);
+            if (!fs.existsSync(inPath)) {
+                console.error(`Master key file not found: ${inPath}`);
+                process.exit(1);
+            }
+            hex = fs.readFileSync(inPath, 'utf-8').trim();
+        } else {
+            hex = args[3].trim();
+        }
+        if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+            console.error(
+                'Invalid master key: expected a 64-character hex string (32 bytes).',
+            );
+            process.exit(1);
+        }
+        hex = hex.toLowerCase();
+        // A Service that still unlocks must be told explicitly before rekeying.
+        let current: string | null = null;
+        try {
+            current = await wiseKey.exportMasterKey();
+        } catch {
+            /* locked: importing the exported key is the way back in */
+        }
+        if (current && current !== hex && !force) {
+            console.error(
+                `Service "${serviceName}" currently unlocks with a different Master Key. Keys encrypted with that key become unreadable if you import another one; re-run with --force, or use \`rotate <hex>\` to re-encrypt instead.`,
+            );
+            process.exit(1);
+        }
+        await wiseKey.importMasterKey(hex);
+        console.log(
+            `Imported Master Key into service: ${serviceName}. Run \`wisekey ${serviceName} master-key rotate-wrap\` to re-wrap it under a fresh Wrap Key.`,
+        );
+        return;
+    }
+    if (action === 'rotate-wrap') {
+        await wiseKey.rotateWrapKey();
+        console.log(
+            `Re-wrapped the Master Key of service: ${serviceName} under a new Wrap Key. Keys were not re-encrypted.`,
+        );
+        return;
+    }
 }
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
@@ -85,6 +199,7 @@ async function main(): Promise<void> {
             );
             process.exit(1);
         }
+        assertUsableKeyName(args[2]);
         if (args[3] === '--file' || args[3] === '-f') {
             if (args.length !== 5 || !args[4]) {
                 console.error(
@@ -107,6 +222,51 @@ async function main(): Promise<void> {
         if (!NAME_REGEX.test(args[2])) {
             console.error(
                 'Invalid key name. Allowed: A-Za-z0-9_.- up to 64 chars.',
+            );
+            process.exit(1);
+        }
+        assertUsableKeyName(args[2]);
+    } else if (args[1] === 'master-key') {
+        const action = args[2];
+        if (!MASTER_KEY_ACTIONS.includes(action)) {
+            console.error(
+                `Unknown master-key action "${action}". Allowed: ${MASTER_KEY_ACTIONS.join(', ')}.`,
+            );
+            process.exit(1);
+        }
+        if (action === 'export' && args.length > 3) {
+            if (
+                args.length !== 5 ||
+                (args[3] !== '--file' && args[3] !== '-f') ||
+                !args[4]
+            ) {
+                console.error(
+                    'Usage: wisekey <serviceName> master-key export [--file <path>]',
+                );
+                process.exit(1);
+            }
+        }
+        if (action === 'import') {
+            const fromFile = args[3] === '--file' || args[3] === '-f';
+            if (fromFile ? args.length !== 5 || !args[4] : args.length !== 4) {
+                console.error(
+                    'Usage: wisekey <serviceName> master-key import <hex> [--force]',
+                );
+                console.error(
+                    '       wisekey <serviceName> master-key import --file <path>',
+                );
+                process.exit(1);
+            }
+            if (!fromFile && args[4] !== undefined && args[4] !== '--force') {
+                console.error(
+                    `Unknown option "${args[4]}". Use --force to overwrite the stored Master Key.`,
+                );
+                process.exit(1);
+            }
+        }
+        if (action === 'rotate-wrap' && args.length !== 3) {
+            console.error(
+                'Usage: wisekey <serviceName> master-key rotate-wrap',
             );
             process.exit(1);
         }
@@ -136,6 +296,10 @@ async function main(): Promise<void> {
         process.exit(1);
     }
     try {
+        if (args[1] === 'master-key') {
+            await runMasterKeyCommand(wiseKey, serviceName, args);
+            return;
+        }
         if (args[1] === 'rotate') {
             const newKey = args[2];
             await wiseKey.rotate(newKey);
