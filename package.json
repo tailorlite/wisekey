@@ -1,6 +1,6 @@
 {
     "name": "wisekey",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "description": "A lightweight key management library and CLI for Node.js",
     "main": "./dist/src/WiseKey.js",
     "types": "./dist/src/WiseKey.d.ts",
