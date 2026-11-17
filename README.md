@@ -1,12 +1,12 @@
 # WiseKey
 
-A lightweight key management library and CLI for Node.js. Secrets are encrypted with AES-256-GCM and kept in an embedded LMDB store; the encryption key is itself wrapped by a per-service key held separately on disk. No OS keychain, no daemons, no prompts — the same behaviour on Linux, macOS, Windows, containers and CI.
+A lightweight key management library and CLI for Node.js. Secrets are encrypted with AES-256-GCM and kept in an embedded LMDB store; the encryption key is itself wrapped by a per-service key held separately on disk. No OS keystore, no daemons, no prompts — the same behaviour on Linux, macOS, Windows, containers and CI.
 
 ## Features
 
 - **Encrypted at rest**: every value is sealed with AES-256-GCM before it reaches LMDB.
 - **Wrapped Master Key**: the key that encrypts your secrets is stored wrapped, and the key that wraps it lives outside the database file — copying the database alone discloses nothing.
-- **No platform keyring**: no D-Bus, no Credential Manager, no GNOME Keyring unlock prompts, nothing to install per distribution.
+- **No platform keystore**: no D-Bus, no Credential Manager, no OS secure-store unlock prompts, nothing to install per distribution.
 - **Recoverable**: export a service's Master Key for backup, and import it to unlock a service whose wrap key was lost.
 - **Key rotation**: rotate the Master Key (re-encrypts everything) or re-wrap it (cheap, touches nothing else).
 - **Singleton design**: initialize once and reuse the same instance across your app.
@@ -81,7 +81,7 @@ So the boundary is the **filesystem**, not an OS keystore:
 - A copy of `data.mdb` alone is useless — the Master Key inside it is encrypted.
 - Anyone who can read both `data.mdb` and `wrap/` can decrypt everything. That includes any process running as you, and anyone with the disk unencrypted and unlocked.
 - On POSIX, WiseKey treats a failure to set `700`/`600` on these files as a fatal error (`InsecureEnvironmentError`). On Windows the POSIX bits are not enforced, so protection comes from your user-profile NTFS ACLs.
-- Against a same-user attacker or an offline disk, an OS keyring plus full-disk encryption is stronger than this scheme; WiseKey trades that for working everywhere and never trapping your data behind an unlock prompt you cannot answer (which is what `cross-keychain` did on headless RHEL — see `docs/adr/0005-*`).
+- Against a same-user attacker or an offline disk, an OS keystore plus full-disk encryption is stronger than this scheme; WiseKey trades that for working everywhere and never trapping your data behind an unlock prompt you cannot answer (see `docs/adr/0005-protect-master-key-with-wrap-key.md`).
 
 **Backups.** A service is only recoverable from its whole directory (`data.mdb` + `wrap/`), or from its exported Master Key. Backing up `data.mdb` alone silently loses the service. Export the Master Key to offline storage you trust, and treat it as the root secret it is.
 

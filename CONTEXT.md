@@ -18,7 +18,7 @@ _Avoid_: credential, token, config value
 
 **Master Key (MK)**:
 The key that encrypts every Key of a Service. Rotating it re-encrypts the Service.
-_Avoid_: data key, root key, keychain key
+_Avoid_: data key, root key, OS keystore key
 
 **Wrap Key (WK)**:
 The per-Service secret that protects the Master Key at rest. It is deliberately kept apart from the encrypted Secrets so that the Secrets alone are worthless.
